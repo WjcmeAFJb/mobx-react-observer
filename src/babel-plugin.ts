@@ -1,4 +1,4 @@
-import createPlugin from "./transform";
+import createPlugin from "./transform.js";
 
 export default function plugin(options: { exclude?: string[] } = {}) {
   return createPlugin({
