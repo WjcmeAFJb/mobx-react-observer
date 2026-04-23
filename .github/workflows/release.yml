@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            swc/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('swc/**/Cargo.toml') }}
+
+      - name: Install npm deps
+        run: npm ci --ignore-scripts
+
+      - name: Build SWC wasm
+        working-directory: swc
+        run: |
+          cargo build --release -p swc_plugin_observing_components --target wasm32-wasip1
+          mkdir -p ../wasm
+          cp target/wasm32-wasip1/release/swc_plugin_observing_components.wasm ../wasm/observer.wasm
+
+      - name: Build package
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+
+      - name: Resolve version + paths
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version ($VERSION) does not match package.json version ($PKG_VERSION)"
+            exit 1
+          fi
+          TARBALL="mobx-react-observer-${VERSION}.tgz"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${TARBALL}"
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "tarball=$TARBALL"
+            echo "url=$URL"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Pack tarball
+        run: |
+          npm pack
+          # npm pack produces mobx-react-observer-<version>.tgz which is what we advertise
+          test -f "${{ steps.meta.outputs.tarball }}"
+
+      - name: Write release notes
+        id: notes
+        run: |
+          cat > RELEASE_NOTES.md <<EOF
+          # mobx-react-observer ${{ steps.meta.outputs.tag }}
+
+          Pre-built tarball ready for pnpm / npm / yarn consumption over HTTPS.
+
+          ## Install from this release
+
+          \`\`\`sh
+          pnpm add ${{ steps.meta.outputs.url }}
+          \`\`\`
+
+          Direct tarball link: ${{ steps.meta.outputs.url }}
+
+          ## Notes
+
+          - The tarball is the result of \`npm pack\` and contains the pre-built
+            \`dist/\` and the SWC wasm at \`wasm/observer.wasm\`. No build step
+            runs at install time.
+          - The SWC wasm is compiled against \`swc_core\` 64.0.0 which matches
+            the \`@swc/core\` shipped with \`@vitejs/plugin-react-swc\` 4.x
+            (Vite 7 and Vite 8).
+          EOF
+          echo "path=RELEASE_NOTES.md" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            --title "mobx-react-observer ${{ steps.meta.outputs.tag }}" \
+            --notes-file "${{ steps.notes.outputs.path }}" \
+            "${{ steps.meta.outputs.tarball }}"
