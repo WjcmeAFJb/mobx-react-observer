@@ -1,0 +1,22 @@
+[workspace]
+members = ["swc-plugin-observing-components"]
+resolver = "2"
+
+[workspace.package]
+authors      = ["forked from observing-components"]
+edition      = "2021"
+homepage     = "https://github.com/WjcmeAFJb/mobx-react-observer"
+license      = "MIT"
+repository   = "https://github.com/WjcmeAFJb/mobx-react-observer.git"
+rust-version = "1.70"
+
+[workspace.dependencies]
+serde      = "1.0.203"
+serde_json = "1.0.117"
+swc_core   = "64.0.0"
+
+[profile.release]
+codegen-units = 1
+lto           = true
+opt-level     = "s"
+strip         = "symbols"

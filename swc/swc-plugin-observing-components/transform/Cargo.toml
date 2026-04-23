@@ -1,0 +1,16 @@
+[package]
+description  = "AST Transforms for mobx-react-observer"
+name         = "wrap_components_with_observer"
+version      = "0.30.0"
+
+authors      = { workspace = true }
+edition      = { workspace = true }
+homepage     = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+rust-version = { workspace = true }
+
+[dependencies]
+serde    = { workspace = true, features = ["derive"] }
+swc_core = { workspace = true, features = ["ecma_ast", "ecma_visit", "common"] }
+globset  = "0.4.13"

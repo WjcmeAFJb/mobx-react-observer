@@ -1,8 +1,10 @@
 # mobx-react-observer
 
-Automatic React observer for Mobx
+Automatic React observer for MobX.
 
-Will wrap all components in your project (not libraries from node_modules) with the `observer`, making observation completely transparent with Mobx.
+Will wrap all components in your project (not libraries from `node_modules`) with `observer`, making observation completely transparent with MobX.
+
+> This is a fork of [`christianalfoni/mobx-react-observer`](https://github.com/christianalfoni/mobx-react-observer) with fixes for `forwardRef`, `memo`, TypeScript function overloads and a rebuilt SWC plugin that works on Vite 7/8.
 
 **BEFORE**
 
@@ -58,7 +60,7 @@ function Counter() {
 Other benefits:
 
 - You can now export functions as normal and they show up with the correct name in React Devtools
-- When exporting with export `const Comp = observer()` VSCode will read that as two definitions of the component, affecting "jump to definition". Now there is only one definition for every component
+- When exporting with `export const Comp = observer()` VSCode will read that as two definitions of the component, affecting "jump to definition". Now there is only one definition for every component
 - Instead of having multiple ways to observe, just create smaller components to optimize rendering
 
 Read more about automatic observation in [observing-components](https://github.com/christianalfoni/observing-components).
@@ -71,7 +73,7 @@ npm install mobx-react-observer
 
 ## SSR
 
-If you do **server side rendering** (SSR), the plugins will still work, but as always you should use `enableStaticRendering` , for example:
+If you do **server side rendering** (SSR), the plugins will still work, but as always you should use `enableStaticRendering`:
 
 **App.tsx**
 
@@ -123,4 +125,60 @@ export default defineConfig({
     }),
   ],
 });
+```
+
+## What this fork fixes
+
+### `forwardRef` and `memo` components
+
+The upstream Babel plugin would wrap the inner function instead of the outer `forwardRef(...)`/`memo(...)` call, which broke ref forwarding because `observer` from `mobx-react-lite` expects a plain function component, not a `(props, ref) => …` render function.
+
+This fork always wraps `observer` on the outside:
+
+```tsx
+// Source
+const Field = forwardRef((props, ref) => <input ref={ref} {...props} />);
+
+// After transform (this fork)
+const Field = observer(forwardRef((props, ref) => <input ref={ref} {...props} />));
+```
+
+The same is true for `memo`, `React.forwardRef`, `React.memo`, nested combinations such as `memo(forwardRef(...))`, named function expressions (`forwardRef(function Field(props, ref) { … })`), and anonymous `export default forwardRef(...)`. Custom, unknown higher-order wrappers keep the previous behavior of wrapping the inner function, so existing projects are not affected.
+
+A component that already has an explicit `observer(...)` anywhere along the wrapper chain is left alone.
+
+### TypeScript function overloads
+
+Previously, a component written with overload signatures would be transformed into a program where the overload signatures and the generated `const` redeclared the same name, which broke both type-checking and runtime:
+
+```ts
+function Foo(x: string): JSX.Element;
+function Foo(x: number): JSX.Element;
+function Foo(x: any): JSX.Element {
+  return <div>{x}</div>;
+}
+```
+
+The fork detects the preceding `TSDeclareFunction` overload siblings and drops them when rewriting the implementation into `const Foo = observer(function Foo(...) { … })` (the source code still type-checks against the original overloads; Babel-emitted JS is what is cleaned up). Exported overloads are handled as well (`export function …`). The SWC pipeline was already strip-types-first, but a test is included to make the behavior explicit.
+
+### SWC plugin no longer crashes on Vite 8
+
+Upstream's `swc-plugin-observing-components` was compiled against `swc_core` 13, which is ABI-incompatible with the `@swc/core` shipped by `@vitejs/plugin-react-swc` 4.x (Vite 7 and Vite 8). This fork rebuilds the wasm against `swc_core` 64.0.0 and ships it directly inside the package at `mobx-react-observer/wasm/observer.wasm`, so the SWC plugin works out-of-the-box on current Vite.
+
+The `swc-plugin` entry resolves to that bundled wasm at runtime, so there is no separate `swc-plugin-observing-components` dependency anymore.
+
+## Development
+
+```sh
+npm install
+npm test          # babel transform tests + swc wasm integration tests
+npm run build     # emits dist/esm + dist/cjs
+```
+
+The Rust sources for the SWC plugin live in `swc/` and are built with:
+
+```sh
+cd swc
+cargo build --release -p swc_plugin_observing_components --target wasm32-wasip1
+cp target/wasm32-wasip1/release/swc_plugin_observing_components.wasm ../wasm/observer.wasm
 ```

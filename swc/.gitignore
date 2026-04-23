@@ -6,6 +6,8 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 .pnpm-debug.log*
+target
+vite-project
 
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
@@ -128,10 +130,3 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
-
-# Rust / cargo build artifacts for the bundled SWC plugin
-swc/target/
-swc/Cargo.lock
-
-# SWC plugin runtime cache
-.swc/

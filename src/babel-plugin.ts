@@ -1,7 +1,7 @@
-import observingComponentsPlugin from "babel-plugin-observing-components";
+import createPlugin from "./transform";
 
 export default function plugin(options: { exclude?: string[] } = {}) {
-  return observingComponentsPlugin({
+  return createPlugin({
     importPath: "mobx-react-observer",
     ...options,
   });

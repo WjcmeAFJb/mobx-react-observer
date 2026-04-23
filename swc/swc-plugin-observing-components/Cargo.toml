@@ -1,0 +1,21 @@
+[package]
+description = "SWC plugin used by mobx-react-observer to wrap React components with observer"
+name        = "swc_plugin_observing_components"
+publish     = false
+version     = "0.20.0"
+
+authors      = { workspace = true }
+edition      = { workspace = true }
+homepage     = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wrap_components_with_observer = { path = "./transform" }
+serde_json = { workspace = true }
+swc_core = { workspace = true, features = ["ecma_plugin_transform", "ecma_ast", "ecma_visit", "common", "common_concurrent"] }
+globset = "0.4.13"
