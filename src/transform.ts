@@ -35,6 +35,13 @@ export interface TransformOptions {
   importPath: string;
   importName?: string;
   exclude?: string[];
+  /**
+   * Additional callee names to treat like `memo` — i.e. stripped entirely
+   * when they wrap a component-like expression. The built-in list
+   * (`memo`, `React.memo`) is always applied; anything here is added on
+   * top.
+   */
+  stripAsMemo?: string[];
 }
 
 export interface TransformState extends PluginPass {
@@ -53,10 +60,12 @@ const WRAPPER_NAMES = new Set([
   "React.memo",
 ]);
 
-const MEMO_NAMES = new Set(["memo", "React.memo"]);
+const DEFAULT_MEMO_NAMES = ["memo", "React.memo"] as const;
 
-function isMemoName(name: string): boolean {
-  return MEMO_NAMES.has(name);
+function buildMemoNameSet(extras: string[] | undefined): Set<string> {
+  const set = new Set<string>(DEFAULT_MEMO_NAMES);
+  if (extras) for (const name of extras) set.add(name);
+  return set;
 }
 
 function calleeName(node: CallExpression): string | null {
@@ -274,6 +283,7 @@ function collectCallChain(
 function wrapExpressionFunctionWithObserver(
   path: NodePath<FunctionExpression> | NodePath<ArrowFunctionExpression>,
   observerName: string,
+  memoNames: Set<string>,
 ): boolean {
   const { chain, observed } = collectCallChain(path, observerName);
   if (observed) return false;
@@ -287,13 +297,14 @@ function wrapExpressionFunctionWithObserver(
     return true;
   }
 
-  // Rebuild the chain: drop every memo / React.memo layer, keep every
-  // other wrapper (forwardRef, unknown HOCs, etc). observer already
-  // memoises and can't call a memo-wrapped component as a render
-  // function, so memo wrappers are always removed.
+  // Rebuild the chain: drop every memo / React.memo (and any caller-
+  // supplied memo-alias) layer, keep every other wrapper (forwardRef,
+  // unknown HOCs, etc). observer already memoises and can't call a
+  // memo-wrapped component as a render function, so memo wrappers are
+  // always removed.
   let rebuilt: Expression = path.node as Expression;
   for (const { path: wrapperPath, name } of chain) {
-    if (name !== null && isMemoName(name)) continue;
+    if (name !== null && memoNames.has(name)) continue;
     const wrapperCall = wrapperPath.node;
     const rest = wrapperCall.arguments.slice(1) as CallExpression["arguments"];
     rebuilt = callExpression(
@@ -334,6 +345,7 @@ export const transform: PluginObj<TransformState> = {
       const IMPORT_PATH = state.opts.importPath;
       const IMPORT_NAME = state.opts.importName || "observer";
       const EXCLUDE_PATTERNS = state.opts.exclude;
+      const MEMO_NAMES = buildMemoNameSet(state.opts.stripAsMemo);
 
       if (!shouldProcessFile(filename, EXCLUDE_PATTERNS)) return;
 
@@ -364,7 +376,26 @@ export const transform: PluginObj<TransformState> = {
         if (!hasJsx(fnPath)) return;
         if (isAlreadyObserved(fnPath, IMPORT_NAME)) return;
 
-        const insideWrapper = isInsideWrapperCall(fnPath);
+        // `insideWrapper` is a chain-wide check: any ancestor call whose
+        // callee is one of the known wrappers (forwardRef/memo/React.*)
+        // OR one of the user-declared memo aliases counts. This makes
+        // `export default memo(someHOC(fn))` (no uppercase name) still
+        // get processed.
+        let insideWrapper = false;
+        {
+          let cur: NodePath | null = fnPath.parentPath;
+          while (cur && isCallExpression(cur.node)) {
+            const name = calleeName(cur.node as CallExpression);
+            if (
+              name &&
+              (WRAPPER_NAMES.has(name) || MEMO_NAMES.has(name))
+            ) {
+              insideWrapper = true;
+              break;
+            }
+            cur = cur.parentPath;
+          }
+        }
         const componentName = findComponentName(fnPath);
 
         if (!insideWrapper && !componentName) return;
@@ -377,6 +408,7 @@ export const transform: PluginObj<TransformState> = {
           didWrap = wrapExpressionFunctionWithObserver(
             fnPath as NodePath<FunctionExpression> | NodePath<ArrowFunctionExpression>,
             IMPORT_NAME,
+            MEMO_NAMES,
           );
         }
         if (didWrap) {
@@ -415,6 +447,7 @@ export default function createPlugin(options: TransformOptions) {
       importPath: options.importPath,
       importName: options.importName || "observer",
       exclude: options.exclude || [],
+      stripAsMemo: options.stripAsMemo || [],
     },
   ];
 }

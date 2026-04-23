@@ -11,6 +11,12 @@ pub struct Config {
     pub import_path: String,
     #[serde(default)]
     pub exclude: Vec<String>,
+    /// Additional callee names that should be treated like `memo` — i.e.
+    /// stripped entirely when they wrap a component-like expression.
+    /// Default list is always `["memo", "React.memo"]`; anything here is
+    /// added on top.
+    #[serde(default, rename = "strip_as_memo")]
+    pub strip_as_memo: Vec<String>,
 }
 
 // Helper function to check if a path should be excluded
@@ -139,49 +145,53 @@ fn is_component_name(name: &str) -> bool {
     }
 }
 
-fn is_memo_callee_expr(call: &CallExpr) -> bool {
+fn callee_name(call: &CallExpr) -> Option<String> {
     if let Callee::Expr(callee) = &call.callee {
         match &**callee {
-            Expr::Ident(id) => &*id.sym == "memo",
+            Expr::Ident(id) => Some(id.sym.to_string()),
             Expr::Member(m) => {
                 if let Expr::Ident(obj) = &*m.obj {
                     if let MemberProp::Ident(prop) = &m.prop {
-                        return &*obj.sym == "React" && &*prop.sym == "memo";
+                        return Some(format!("{}.{}", obj.sym, prop.sym));
                     }
                 }
-                false
+                None
             }
-            _ => false,
+            _ => None,
         }
     } else {
-        false
+        None
     }
 }
 
-fn is_known_wrapper_callee_expr(call: &CallExpr) -> bool {
-    if let Callee::Expr(callee) = &call.callee {
-        match &**callee {
-            Expr::Ident(id) => matches!(&*id.sym, "memo" | "forwardRef"),
-            Expr::Member(m) => {
-                if let Expr::Ident(obj) = &*m.obj {
-                    if let MemberProp::Ident(prop) = &m.prop {
-                        return &*obj.sym == "React"
-                            && matches!(&*prop.sym, "memo" | "forwardRef");
-                    }
-                }
-                false
-            }
-            _ => false,
+fn is_memo_callee_expr(call: &CallExpr, extra: &[String]) -> bool {
+    match callee_name(call) {
+        Some(name) => {
+            name == "memo"
+                || name == "React.memo"
+                || extra.iter().any(|e| e == &name)
         }
-    } else {
-        false
+        None => false,
     }
 }
 
+// We no longer restrict stripping to known wrappers: any call chain whose
+// innermost first-arg eventually reaches a JSX-producing function
+// expression is treated as "component-producing", so
+// `memo(withSomeHOC(function Component() { return <div /> }))` becomes
+// `observer(withSomeHOC(function Component() { return <div /> }))`.
 fn is_component_like_for_stripping(expr: &Expr) -> bool {
     match expr {
-        Expr::Fn(_) | Expr::Arrow(_) => true,
-        Expr::Call(call) => is_known_wrapper_callee_expr(call),
+        Expr::Fn(f) => contains_jsx_in_function(&f.function),
+        Expr::Arrow(a) => match &*a.body {
+            BlockStmtOrExpr::BlockStmt(b) => contains_jsx_in_block(b),
+            BlockStmtOrExpr::Expr(e) => contains_jsx_in_expr(e),
+        },
+        Expr::Call(call) => call
+            .args
+            .first()
+            .map(|arg| is_component_like_for_stripping(&arg.expr))
+            .unwrap_or(false),
         Expr::Paren(p) => is_component_like_for_stripping(&p.expr),
         _ => false,
     }
@@ -363,14 +373,15 @@ fn module_contains_wrapped_function(module: &Module, observer_name: &str) -> boo
 impl Fold for ObserverTransform {
     noop_fold_type!();
 
-    // Recursively collapse memo(...)/React.memo(...) wrappers around a
-    // component-like expression. observer from mobx-react-lite memoises
-    // already and, more importantly, it can't be applied on top of a
-    // memo() result because observer calls the base as a render function.
+    // Recursively collapse memo(...)/React.memo(...) (and any callee in
+    // the user's `strip_as_memo` list) wrappers around a component-like
+    // expression. observer from mobx-react-lite memoises already and,
+    // more importantly, it can't be applied on top of a memo() result
+    // because observer calls the base as a render function.
     fn fold_expr(&mut self, expr: Expr) -> Expr {
         let expr = expr.fold_children_with(self);
         if let Expr::Call(call) = &expr {
-            if is_memo_callee_expr(call) {
+            if is_memo_callee_expr(call, &self.config.strip_as_memo) {
                 if let Some(first) = call.args.first() {
                     if is_component_like_for_stripping(&first.expr) {
                         return (*first.expr).clone();

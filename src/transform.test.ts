@@ -229,6 +229,68 @@ export function Foo(x: any): JSX.Element {
   });
 });
 
+describe("memo around unknown HOCs", () => {
+  test("memo(unknownHOC(fn)) drops memo, keeps unknown HOC, wraps observer outside", () => {
+    expect(
+      run(
+        `const Component = memo(withSomeHOCSome(function Component() { return <div />; }));`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Component = observer(withSomeHOCSome(function Component() {
+  return <div />;
+}));`);
+  });
+
+  test("unknownHOC(memo(fn)) drops inner memo, keeps unknown HOC, wraps observer outside", () => {
+    expect(
+      run(
+        `const Component = withSomeHOCSome(memo(function Component() { return <div />; }));`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Component = observer(withSomeHOCSome(function Component() {
+  return <div />;
+}));`);
+  });
+
+  test("export default memo(unknownHOC(fn)) drops memo without requiring uppercase variable", () => {
+    expect(
+      run(
+        `export default memo(withSomeHOCSome(function Component() { return <div />; }));`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+export default observer(withSomeHOCSome(function Component() {
+  return <div />;
+}));`);
+  });
+
+  test("memo(unknownA(unknownB(fn))) drops memo, keeps both unknowns", () => {
+    expect(
+      run(
+        `const Component = memo(unknownA(unknownB(() => <div />)));`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Component = observer(unknownA(unknownB(() => <div />)));`);
+  });
+
+  test("custom memo aliases via stripAsMemo are also stripped", () => {
+    const src = `const Component = withMemo(withSomeHOCSome(function Component() { return <div />; }));`;
+    const out = transformSync(src, {
+      babelrc: false,
+      configFile: false,
+      filename: "test.tsx",
+      plugins: [
+        ["@babel/plugin-syntax-typescript", { isTSX: true }],
+        createPlugin({
+          importPath: "mobx-react-observer",
+          stripAsMemo: ["withMemo"],
+        }),
+      ],
+    })!.code!;
+    expect(out).toContain(`observer(withSomeHOCSome(function Component()`);
+    expect(out).not.toMatch(/withMemo\(/);
+  });
+});
+
 describe("function expressions as HOC args", () => {
   test("wraps observer outside an unknown uppercase-named HOC result", () => {
     // For an unknown HOC, observer wraps the whole HOC call so that the

@@ -156,16 +156,31 @@ const Field2 = observer(forwardRef(function Field2(props, ref) { … }));
 This fork removes every `memo(...)` / `React.memo(...)` wrapper encountered around a component:
 
 ```tsx
-// Source                                     // After transform
-const A = memo(() => <div />);                const A = observer(() => <div />);
-const B = memo(function B() { … });           const B = observer(function B() { … });
-const C = React.memo(() => <div />);          const C = observer(() => <div />);
-const D = memo(forwardRef((p, ref) => …));    const D = observer(forwardRef((p, ref) => …));
-const E = forwardRef(memo(fn));               const E = observer(forwardRef(fn));
-const F = customHOC(memo(fn));                const F = observer(customHOC(fn));
+// Source                                       // After transform
+const A = memo(() => <div />);                  const A = observer(() => <div />);
+const B = memo(function B() { … });             const B = observer(function B() { … });
+const C = React.memo(() => <div />);            const C = observer(() => <div />);
+const D = memo(forwardRef((p, ref) => …));      const D = observer(forwardRef((p, ref) => …));
+const E = forwardRef(memo(fn));                 const E = observer(forwardRef(fn));
+const F = customHOC(memo(fn));                  const F = observer(customHOC(fn));
+const G = memo(withSomeHOC(function G() { … })); const G = observer(withSomeHOC(function G() { … }));
 ```
 
-The stripping is recursive: nested memo layers anywhere in the expression tree are removed, then the outermost chain is wrapped with `observer`. Components already wrapped in `observer(...)` are left alone, but any `memo(...)` that shows up inside them is still stripped.
+The stripping is recursive and the "component-like" check walks through the first-arg chain of every call, so it works even when the memo is wrapped around an unknown HOC (`memo(withSomeHOC(fn))`). Components already wrapped in `observer(...)` are left alone, but any `memo(...)` inside them is still stripped.
+
+### Treating your own wrappers like `memo`
+
+If you have a project-specific HOC that also returns a memoised component (e.g. `withMemo`), you can add its name to `stripAsMemo` (camelCase for the babel plugin, `strip_as_memo` / snake_case for the SWC plugin — that's how `@swc/core` expects plugin config) and it will be removed the same way:
+
+```ts
+// Babel
+observerPlugin({ stripAsMemo: ["withMemo"] });
+
+// SWC (the JS shim translates to `strip_as_memo`)
+observerPlugin({ stripAsMemo: ["withMemo"] });
+```
+
+The built-in list (`memo`, `React.memo`) is always applied; entries in `stripAsMemo` are added on top.
 
 ### TypeScript function overloads
 

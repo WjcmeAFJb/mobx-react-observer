@@ -4,14 +4,22 @@ import { resolve } from "node:path";
 
 const wasmPath = resolve(__dirname, "..", "wasm", "observer.wasm");
 
-async function runSwc(src: string): Promise<string> {
+async function runSwc(
+  src: string,
+  extraConfig: Record<string, unknown> = {},
+): Promise<string> {
   const out = await transform(src, {
     filename: "/tmp/test.tsx",
     jsc: {
       parser: { syntax: "typescript", tsx: true },
       target: "es2022",
       experimental: {
-        plugins: [[wasmPath, { import_path: "mobx-react-observer" }]],
+        plugins: [
+          [
+            wasmPath,
+            { import_path: "mobx-react-observer", ...extraConfig },
+          ],
+        ],
       },
     },
   });
@@ -133,5 +141,36 @@ describe("swc wasm plugin (against the @swc/core that ships with Vite 7/8)", () 
     const out = await runSwc(`const Foo = observer(memo(() => <div />));`);
     expect(out).toMatch(/const Foo = observer\(\(\)/);
     expect(out).not.toMatch(/\bmemo\(/);
+  });
+
+  test("memo(unknownHOC(function Component(){...})) keeps the HOC, drops memo, wraps observer outside", async () => {
+    const out = await runSwc(
+      `const Component = memo(withSomeHOCSome(function Component() { return <div />; }));`,
+    );
+    expect(out).toMatch(
+      /const Component = observer\(withSomeHOCSome\(function Component\(/,
+    );
+    expect(out).not.toMatch(/\bmemo\(/);
+  });
+
+  test("unknownHOC(memo(fn)) drops inner memo, keeps the HOC", async () => {
+    const out = await runSwc(
+      `const Component = withSomeHOCSome(memo(function Component() { return <div />; }));`,
+    );
+    expect(out).toMatch(
+      /const Component = observer\(withSomeHOCSome\(function Component\(/,
+    );
+    expect(out).not.toMatch(/\bmemo\(/);
+  });
+
+  test("custom memo-alias via strip_as_memo is stripped", async () => {
+    const out = await runSwc(
+      `const Component = withMemo(withSomeHOCSome(() => <div />));`,
+      { strip_as_memo: ["withMemo"] },
+    );
+    expect(out).toMatch(
+      /const Component = observer\(withSomeHOCSome\(\(\)/,
+    );
+    expect(out).not.toMatch(/withMemo\(/);
   });
 });

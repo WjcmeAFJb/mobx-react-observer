@@ -12,9 +12,17 @@ function resolveWasmPath(): string {
   return baseRequire.resolve("mobx-react-observer/wasm/observer.wasm");
 }
 
-export default function plugin(options: { exclude?: string[] } = {}) {
-  return [
-    resolveWasmPath(),
-    { import_path: "mobx-react-observer", ...options },
-  ];
+export default function plugin(
+  options: { exclude?: string[]; stripAsMemo?: string[] } = {},
+) {
+  const { stripAsMemo, ...rest } = options;
+  const config: Record<string, unknown> = {
+    import_path: "mobx-react-observer",
+    ...rest,
+  };
+  // swc plugin config uses snake_case field names (serde default).
+  if (stripAsMemo && stripAsMemo.length > 0) {
+    config.strip_as_memo = stripAsMemo;
+  }
+  return [resolveWasmPath(), config];
 }
