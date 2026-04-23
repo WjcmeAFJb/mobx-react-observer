@@ -95,6 +95,55 @@ function startsWithUppercase(name: string): boolean {
   return /^[A-Z]/.test(name);
 }
 
+// Opt-out pragma: a leading comment containing "@no-observer" on (or
+// above) the enclosing statement tells the plugin to leave that
+// component alone. Works for both line and block comments.
+const NO_OBSERVER_PRAGMA = "@no-observer";
+
+function nodeHasIgnoreComment(node: {
+  leadingComments?: ReadonlyArray<{ value: string }> | null;
+}): boolean {
+  const cs = node.leadingComments;
+  if (!cs) return false;
+  for (const c of cs) {
+    if (c.value.includes(NO_OBSERVER_PRAGMA)) return true;
+  }
+  return false;
+}
+
+function hasIgnorePragma(path: NodePath): boolean {
+  // Walk up from the function to the nearest enclosing Statement /
+  // Declaration and check leading comments at each step. This covers:
+  //   // @no-observer
+  //   const Foo = () => <div />;          (comment on VariableDeclaration)
+  //
+  //   // @no-observer
+  //   function Foo() { … }                (comment on FunctionDeclaration)
+  //
+  //   // @no-observer
+  //   export default () => <div />;       (comment on ExportDefaultDeclaration)
+  //
+  //   const Foo = /* @no-observer */ () => <div />;
+  //                                        (comment on the arrow itself)
+  let current: NodePath | null = path;
+  while (current) {
+    if (nodeHasIgnoreComment(current.node as any)) return true;
+    if (current.isStatement() || current.isDeclaration()) {
+      const parent = current.parentPath;
+      if (
+        parent &&
+        (parent.isExportDefaultDeclaration() ||
+          parent.isExportNamedDeclaration())
+      ) {
+        if (nodeHasIgnoreComment(parent.node as any)) return true;
+      }
+      break;
+    }
+    current = current.parentPath;
+  }
+  return false;
+}
+
 function hasJsx(path: NodePath): boolean {
   let found = false;
   path.traverse({
@@ -375,6 +424,7 @@ export const transform: PluginObj<TransformState> = {
         if (isObjectProperty(fnPath.parent)) return;
         if (!hasJsx(fnPath)) return;
         if (isAlreadyObserved(fnPath, IMPORT_NAME)) return;
+        if (hasIgnorePragma(fnPath)) return;
 
         // `insideWrapper` is a chain-wide check: any ancestor call whose
         // callee is one of the known wrappers (forwardRef/memo/React.*)

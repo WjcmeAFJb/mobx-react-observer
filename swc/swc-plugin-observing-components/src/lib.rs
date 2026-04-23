@@ -40,5 +40,8 @@ fn swc_plugin(program: Program, data: TransformPluginProgramMetadata) -> Program
         return program;
     }
 
-    program.apply(wrap_components_with_observer::observer_transform(config))
+    program.apply(wrap_components_with_observer::observer_transform(
+        config,
+        data.comments,
+    ))
 }

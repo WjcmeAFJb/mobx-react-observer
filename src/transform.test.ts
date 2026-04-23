@@ -229,6 +229,78 @@ export function Foo(x: any): JSX.Element {
   });
 });
 
+describe("@no-observer opt-out pragma", () => {
+  test("skips const arrow with leading line comment", () => {
+    expect(
+      run(`// @no-observer
+const Foo = () => <div />;`),
+    ).toBe(`// @no-observer
+const Foo = () => <div />;`);
+  });
+
+  test("skips function declaration with leading line comment", () => {
+    expect(
+      run(`// @no-observer
+function Foo() { return <div />; }`),
+    ).toBe(`// @no-observer
+function Foo() {
+  return <div />;
+}`);
+  });
+
+  test("skips export default with leading line comment", () => {
+    expect(
+      run(`// @no-observer
+export default () => <div />;`),
+    ).toBe(`// @no-observer
+export default () => <div />;`);
+  });
+
+  test("skips export named function with leading line comment", () => {
+    expect(
+      run(`// @no-observer
+export function Foo() { return <div />; }`),
+    ).toBe(`// @no-observer
+export function Foo() {
+  return <div />;
+}`);
+  });
+
+  test("supports block comment pragma", () => {
+    expect(
+      run(`/* @no-observer */
+const Foo = () => <div />;`),
+    ).toBe(`/* @no-observer */
+const Foo = () => <div />;`);
+  });
+
+  test("inline block comment on the arrow expression still opts out", () => {
+    const out = run(`const Foo = /* @no-observer */ () => <div />;`);
+    expect(out).toContain("@no-observer");
+    expect(out).not.toMatch(/observer\(/);
+  });
+
+  test("pragma on one statement does not leak to the next", () => {
+    const out = run(`// @no-observer
+const Foo = () => <div />;
+const Bar = () => <div />;`);
+    expect(out).toMatch(/const Foo = \(\) => <div \/>;/);
+    expect(out).toMatch(/const Bar = observer\(\(\) => <div \/>\);/);
+  });
+
+  test("pragma skips memo + unknown HOC case too", () => {
+    expect(
+      run(
+        `// @no-observer
+const Component = memo(withSomeHOCSome(function Component() { return <div />; }));`,
+      ),
+    ).toBe(`// @no-observer
+const Component = memo(withSomeHOCSome(function Component() {
+  return <div />;
+}));`);
+  });
+});
+
 describe("memo around unknown HOCs", () => {
   test("memo(unknownHOC(fn)) drops memo, keeps unknown HOC, wraps observer outside", () => {
     expect(

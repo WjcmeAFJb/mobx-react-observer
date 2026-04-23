@@ -1,8 +1,11 @@
 use swc_core::ecma::ast::*;
 use swc_core::ecma::visit::{fold_pass, noop_fold_type, Fold, FoldWith};
+use swc_core::common::{comments::Comments, BytePos, Span, Spanned};
 use serde::Deserialize;
 use globset::{Glob, GlobSetBuilder};
 use std::path::Path;
+
+const NO_OBSERVER_PRAGMA: &str = "@no-observer";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
@@ -118,19 +121,45 @@ fn default_import_name() -> String {
     "observer".to_string()
 }
 
-pub fn observer_transform(config: Config) -> impl Pass {
+pub fn observer_transform<C>(config: Config, comments: Option<C>) -> impl Pass
+where
+    C: Comments + 'static,
+{
     fold_pass(ObserverTransform {
         has_added_import: false,
         config,
+        comments,
     })
 }
 
-struct ObserverTransform {
+struct ObserverTransform<C: Comments> {
     has_added_import: bool,
     config: Config,
+    comments: Option<C>,
 }
 
-impl ObserverTransform {
+impl<C: Comments> ObserverTransform<C> {
+    /// Whether a leading comment at `pos` contains the `@no-observer` pragma.
+    fn pragma_at(&self, pos: BytePos) -> bool {
+        let Some(comments) = &self.comments else {
+            return false;
+        };
+        let Some(list) = comments.get_leading(pos) else {
+            return false;
+        };
+        list.iter().any(|c| c.text.contains(NO_OBSERVER_PRAGMA))
+    }
+
+    fn has_ignore_for_item(&self, item: &ModuleItem) -> bool {
+        // swc attaches leading comments to the span.lo of the outermost
+        // statement (keyword position). For an `export …` wrapper that is
+        // the `export` keyword; for a bare `const`/`function` it's the
+        // keyword itself.
+        self.pragma_at(item.span().lo)
+    }
+}
+
+impl<C: Comments> ObserverTransform<C> {
     fn get_import_name(&self) -> String {
         self.config.import_name.clone().unwrap_or_else(|| "observer".to_string())
     }
@@ -370,7 +399,7 @@ fn module_contains_wrapped_function(module: &Module, observer_name: &str) -> boo
     })
 }
 
-impl Fold for ObserverTransform {
+impl<C: Comments + 'static> Fold for ObserverTransform<C> {
     noop_fold_type!();
 
     // Recursively collapse memo(...)/React.memo(...) (and any callee in
@@ -393,10 +422,29 @@ impl Fold for ObserverTransform {
     }
 
     fn fold_module(&mut self, module: Module) -> Module {
-        // First, strip memo layers throughout the module so that the
-        // component-wrapping logic below sees the (already-simplified)
-        // expressions.
-        let mut module = module.fold_children_with(self);
+        // Fold each body item individually so that we can honour the
+        // `// @no-observer` pragma BEFORE memo-stripping fold_expr gets
+        // a chance to touch the ignored item.
+        let Module {
+            body,
+            span,
+            shebang,
+        } = module;
+        let body: Vec<ModuleItem> = body
+            .into_iter()
+            .map(|item| {
+                if self.has_ignore_for_item(&item) {
+                    item
+                } else {
+                    item.fold_children_with(self)
+                }
+            })
+            .collect();
+        let mut module = Module {
+            body,
+            span,
+            shebang,
+        };
 
         let should_add_import = contains_jsx_in_module(&module);
         let observer_name = self.get_import_name();
@@ -460,6 +508,11 @@ impl Fold for ObserverTransform {
         }
 
         let transformed_body = module.body.into_iter().map(|item| {
+            // Honour `// @no-observer` - leave this whole module item
+            // alone.
+            if self.has_ignore_for_item(&item) {
+                return item;
+            }
             // ...existing transformation code...
             match item {
                 // ...existing code...

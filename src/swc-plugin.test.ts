@@ -173,4 +173,44 @@ describe("swc wasm plugin (against the @swc/core that ships with Vite 7/8)", () 
     );
     expect(out).not.toMatch(/withMemo\(/);
   });
+
+  test("// @no-observer opt-out pragma skips the next statement", async () => {
+    const out = await runSwc(
+      `// @no-observer
+const Foo = () => <div />;
+const Bar = () => <div />;`,
+    );
+    // Foo must not be observer-wrapped.
+    expect(out).toMatch(/const Foo = \(\)\s*=>/);
+    expect(out).not.toMatch(/const Foo = observer\(/);
+    // Bar still gets wrapped.
+    expect(out).toMatch(/const Bar = observer\(/);
+  });
+
+  test("@no-observer on a function declaration is honoured", async () => {
+    const out = await runSwc(
+      `// @no-observer
+function Foo() { return <div />; }`,
+    );
+    expect(out).not.toMatch(/observer\(/);
+    expect(out).toMatch(/function Foo\(/);
+  });
+
+  test("@no-observer on export default is honoured", async () => {
+    const out = await runSwc(
+      `// @no-observer
+export default () => <div />;`,
+    );
+    expect(out).not.toMatch(/observer\(/);
+  });
+
+  test("@no-observer works with block comments", async () => {
+    const out = await runSwc(
+      `/* @no-observer */
+const Foo = memo(() => <div />);`,
+    );
+    // memo should ALSO be preserved (we leave the whole statement alone).
+    expect(out).toMatch(/const Foo = memo\(/);
+    expect(out).not.toMatch(/observer\(/);
+  });
 });

@@ -65,6 +65,29 @@ Other benefits:
 
 Read more about automatic observation in [observing-components](https://github.com/christianalfoni/observing-components).
 
+## Opting a component out
+
+Sometimes you want to keep a specific function unwrapped — it's not really a component, it's a pure JSX helper, or you want to manage observation manually. Add a `// @no-observer` comment on the line directly above the declaration:
+
+```tsx
+// @no-observer
+function JustAHelper() {
+  return <div>not observed</div>;
+}
+
+// @no-observer
+const AlsoIgnored = () => <div />;
+
+// @no-observer
+export default () => <div />;
+
+// Block comment works too:
+/* @no-observer */
+export const Untouched = () => <div />;
+```
+
+The pragma applies to the next statement only. Both Babel and SWC plugins honour it.
+
 ## Install
 
 ```sh
