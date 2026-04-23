@@ -129,23 +129,43 @@ export default defineConfig({
 
 ## What this fork fixes
 
-### `forwardRef` and `memo` components
+### `forwardRef` components
 
-The upstream Babel plugin would wrap the inner function instead of the outer `forwardRef(...)`/`memo(...)` call, which broke ref forwarding because `observer` from `mobx-react-lite` expects a plain function component, not a `(props, ref) => …` render function.
+The upstream plugins would wrap the inner render function instead of the outer `forwardRef(...)`, which broke ref forwarding because `observer` from `mobx-react-lite` expects a plain function component, not a `(props, ref) => …` render function.
 
-This fork always wraps `observer` on the outside:
+This fork always wraps `observer` on the outside of `forwardRef`:
 
 ```tsx
 // Source
 const Field = forwardRef((props, ref) => <input ref={ref} {...props} />);
-
-// After transform (this fork)
+// After transform
 const Field = observer(forwardRef((props, ref) => <input ref={ref} {...props} />));
+
+// Named function expressions work the same way
+const Field2 = forwardRef(function Field2(props, ref) { … });
+// After transform
+const Field2 = observer(forwardRef(function Field2(props, ref) { … }));
 ```
 
-The same is true for `memo`, `React.forwardRef`, `React.memo`, nested combinations such as `memo(forwardRef(...))`, named function expressions (`forwardRef(function Field(props, ref) { … })`), and anonymous `export default forwardRef(...)`. Custom, unknown higher-order wrappers keep the previous behavior of wrapping the inner function, so existing projects are not affected.
+`React.forwardRef` is handled identically, as is `export default forwardRef(...)`.
 
-A component that already has an explicit `observer(...)` anywhere along the wrapper chain is left alone.
+### `memo` is always dropped
+
+`observer` from `mobx-react-lite` already memoises, and more importantly it **cannot be applied on top of a memo() result**: observer calls the base as a render function, but a `memo(...)` return value is a React memo object (`$$typeof === react.memo`), not a function. This is also the reason upstream's `observer(memo(X))` silently broke at render time.
+
+This fork removes every `memo(...)` / `React.memo(...)` wrapper encountered around a component:
+
+```tsx
+// Source                                     // After transform
+const A = memo(() => <div />);                const A = observer(() => <div />);
+const B = memo(function B() { … });           const B = observer(function B() { … });
+const C = React.memo(() => <div />);          const C = observer(() => <div />);
+const D = memo(forwardRef((p, ref) => …));    const D = observer(forwardRef((p, ref) => …));
+const E = forwardRef(memo(fn));               const E = observer(forwardRef(fn));
+const F = customHOC(memo(fn));                const F = observer(customHOC(fn));
+```
+
+The stripping is recursive: nested memo layers anywhere in the expression tree are removed, then the outermost chain is wrapped with `observer`. Components already wrapped in `observer(...)` are left alone, but any `memo(...)` that shows up inside them is still stripped.
 
 ### TypeScript function overloads
 

@@ -1,6 +1,5 @@
 use swc_core::ecma::ast::*;
-use swc_core::ecma::visit::{fold_pass, noop_fold_type, Fold};
-use swc_core::common::pass::CompilerPass;
+use swc_core::ecma::visit::{fold_pass, noop_fold_type, Fold, FoldWith};
 use serde::Deserialize;
 use globset::{Glob, GlobSetBuilder};
 use std::path::Path;
@@ -137,6 +136,77 @@ fn is_component_name(name: &str) -> bool {
         first_char.is_uppercase()
     } else {
         false
+    }
+}
+
+fn is_memo_callee_expr(call: &CallExpr) -> bool {
+    if let Callee::Expr(callee) = &call.callee {
+        match &**callee {
+            Expr::Ident(id) => &*id.sym == "memo",
+            Expr::Member(m) => {
+                if let Expr::Ident(obj) = &*m.obj {
+                    if let MemberProp::Ident(prop) = &m.prop {
+                        return &*obj.sym == "React" && &*prop.sym == "memo";
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
+fn is_known_wrapper_callee_expr(call: &CallExpr) -> bool {
+    if let Callee::Expr(callee) = &call.callee {
+        match &**callee {
+            Expr::Ident(id) => matches!(&*id.sym, "memo" | "forwardRef"),
+            Expr::Member(m) => {
+                if let Expr::Ident(obj) = &*m.obj {
+                    if let MemberProp::Ident(prop) = &m.prop {
+                        return &*obj.sym == "React"
+                            && matches!(&*prop.sym, "memo" | "forwardRef");
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    } else {
+        false
+    }
+}
+
+fn is_component_like_for_stripping(expr: &Expr) -> bool {
+    match expr {
+        Expr::Fn(_) | Expr::Arrow(_) => true,
+        Expr::Call(call) => is_known_wrapper_callee_expr(call),
+        Expr::Paren(p) => is_component_like_for_stripping(&p.expr),
+        _ => false,
+    }
+}
+
+// Deeper variant of "this call's first argument eventually reaches a JSX-
+// producing function expression". Used to decide whether a wrapper call
+// like `customHOC(forwardRef(fn))` should be wrapped with observer.
+fn has_component_like_first_arg(call: &CallExpr) -> bool {
+    call.args
+        .first()
+        .map(|arg| is_component_like_first_arg(&arg.expr))
+        .unwrap_or(false)
+}
+
+fn is_component_like_first_arg(expr: &Expr) -> bool {
+    match expr {
+        Expr::Fn(f) => contains_jsx_in_function(&f.function),
+        Expr::Arrow(a) => match &*a.body {
+            BlockStmtOrExpr::BlockStmt(b) => contains_jsx_in_block(b),
+            BlockStmtOrExpr::Expr(e) => contains_jsx_in_expr(e),
+        },
+        Expr::Call(inner) => has_component_like_first_arg(inner),
+        Expr::Paren(p) => is_component_like_first_arg(&p.expr),
+        _ => false,
     }
 }
 
@@ -293,8 +363,30 @@ fn module_contains_wrapped_function(module: &Module, observer_name: &str) -> boo
 impl Fold for ObserverTransform {
     noop_fold_type!();
 
-    fn fold_module(&mut self, mut module: Module) -> Module {
-        // ...existing code...
+    // Recursively collapse memo(...)/React.memo(...) wrappers around a
+    // component-like expression. observer from mobx-react-lite memoises
+    // already and, more importantly, it can't be applied on top of a
+    // memo() result because observer calls the base as a render function.
+    fn fold_expr(&mut self, expr: Expr) -> Expr {
+        let expr = expr.fold_children_with(self);
+        if let Expr::Call(call) = &expr {
+            if is_memo_callee_expr(call) {
+                if let Some(first) = call.args.first() {
+                    if is_component_like_for_stripping(&first.expr) {
+                        return (*first.expr).clone();
+                    }
+                }
+            }
+        }
+        expr
+    }
+
+    fn fold_module(&mut self, module: Module) -> Module {
+        // First, strip memo layers throughout the module so that the
+        // component-wrapping logic below sees the (already-simplified)
+        // expressions.
+        let mut module = module.fold_children_with(self);
+
         let should_add_import = contains_jsx_in_module(&module);
         let observer_name = self.get_import_name();
 
@@ -509,13 +601,9 @@ impl Fold for ObserverTransform {
                                                 *init = Box::new(wrapped);
                                             },
                                             // Handle cases like const Home = someWrapper(() => <div />)
+                                    // Also handles nested wrappers like customHOC(forwardRef(fn)).
                                             Expr::Call(call_expr) => {
-                                                let has_jsx_arg = call_expr.args.iter().any(|arg| {
-                                                    match &*arg.expr {
-                                                        Expr::Arrow(_) | Expr::Fn(_) => contains_jsx_in_expr(&arg.expr),
-                                                        _ => false
-                                                    }
-                                                });
+                                                let has_jsx_arg = has_component_like_first_arg(call_expr);
                                                 
                                                 if has_jsx_arg {
                                                     let wrapped = Expr::Call(CallExpr {

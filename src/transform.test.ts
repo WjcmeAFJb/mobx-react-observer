@@ -126,26 +126,79 @@ export default observer(forwardRef((props, ref) => <div ref={ref} />));`);
   });
 });
 
-describe("memo", () => {
-  test("observer wraps memo from the outside", () => {
+describe("memo is dropped", () => {
+  // observer from mobx-react-lite already memoises and cannot wrap a memo
+  // component (it tries to invoke the base as a render function). So memo
+  // layers are removed during the transform.
+
+  test("memo(arrow) becomes observer(arrow)", () => {
     expect(
       run(`const Foo = memo((props) => <div>{props.x}</div>);`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(memo(props => <div>{props.x}</div>));`);
+const Foo = observer(props => <div>{props.x}</div>);`);
   });
 
-  test("observer wraps memo+forwardRef combination from the outside", () => {
+  test("memo(forwardRef(fn)) becomes observer(forwardRef(fn))", () => {
     expect(
       run(`const Foo = memo(forwardRef((props, ref) => <div ref={ref} />));`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(memo(forwardRef((props, ref) => <div ref={ref} />)));`);
+const Foo = observer(forwardRef((props, ref) => <div ref={ref} />));`);
   });
 
-  test("observer wraps React.memo", () => {
+  test("memo(named function expression) becomes observer(named fn)", () => {
+    expect(
+      run(`const Foo = memo(function Foo(props) { return <div>{props.x}</div>; });`),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Foo = observer(function Foo(props) {
+  return <div>{props.x}</div>;
+});`);
+  });
+
+  test("React.memo is dropped the same way", () => {
     expect(
       run(`const Foo = React.memo((props) => <div>{props.x}</div>);`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(React.memo(props => <div>{props.x}</div>));`);
+const Foo = observer(props => <div>{props.x}</div>);`);
+  });
+
+  test("React.memo(React.forwardRef(fn)) becomes observer(React.forwardRef(fn))", () => {
+    expect(
+      run(
+        `const Foo = React.memo(React.forwardRef((props, ref) => <div ref={ref} />));`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Foo = observer(React.forwardRef((props, ref) => <div ref={ref} />));`);
+  });
+
+  test("forwardRef(memo(fn)) drops the inner memo", () => {
+    // forwardRef+memo in this order is unusual but still gets stripped so
+    // observer sees a plain render function.
+    expect(
+      run(
+        `const Foo = forwardRef((props, ref) => <div ref={ref} />);
+const Bar = forwardRef(memo(function Bar(props, ref) { return <div ref={ref} />; }));`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Foo = observer(forwardRef((props, ref) => <div ref={ref} />));
+const Bar = observer(forwardRef(function Bar(props, ref) {
+  return <div ref={ref} />;
+}));`);
+  });
+
+  test("memo+memo is collapsed", () => {
+    expect(
+      run(`const Foo = memo(memo((props) => <div>{props.x}</div>));`),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Foo = observer(props => <div>{props.x}</div>);`);
+  });
+
+  test("memo(forwardRef(named)) export default", () => {
+    expect(
+      run(
+        `export default memo(forwardRef((props, ref) => <div ref={ref} />));`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+export default observer(forwardRef((props, ref) => <div ref={ref} />));`);
   });
 });
 
@@ -177,20 +230,23 @@ export function Foo(x: any): JSX.Element {
 });
 
 describe("function expressions as HOC args", () => {
-  test("wraps function expression inside a custom uppercase-named HOC result", () => {
+  test("wraps observer outside an unknown uppercase-named HOC result", () => {
+    // For an unknown HOC, observer wraps the whole HOC call so that the
+    // HOC sees a plain render function (and any observable reads inside
+    // the function re-render via observer's outer subscription).
     expect(
       run(`const Foo = withSomething(function Foo() { return <div />; });`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = withSomething(observer(function Foo() {
+const Foo = observer(withSomething(function Foo() {
   return <div />;
 }));`);
   });
 
-  test("function expression inside forwardRef without a variable declarator still gets observed", () => {
+  test("wraps observer outside forwardRef nested in unknown HOCs with uppercase name", () => {
     expect(
-      run(`something(forwardRef((props, ref) => <div ref={ref} />));`),
+      run(`const Foo = withSomething(forwardRef((props, ref) => <div ref={ref} />));`),
     ).toBe(`import { observer } from "mobx-react-observer";
-something(observer(forwardRef((props, ref) => <div ref={ref} />)));`);
+const Foo = observer(withSomething(forwardRef((props, ref) => <div ref={ref} />)));`);
   });
 });
 

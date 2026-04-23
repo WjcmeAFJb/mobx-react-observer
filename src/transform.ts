@@ -53,6 +53,12 @@ const WRAPPER_NAMES = new Set([
   "React.memo",
 ]);
 
+const MEMO_NAMES = new Set(["memo", "React.memo"]);
+
+function isMemoName(name: string): boolean {
+  return MEMO_NAMES.has(name);
+}
+
 function calleeName(node: CallExpression): string | null {
   const callee = node.callee;
   if (isIdentifier(callee)) return callee.name;
@@ -244,41 +250,61 @@ function wrapFunctionDeclarationWithObservers(
   return true;
 }
 
+function collectCallChain(
+  path: NodePath<FunctionExpression> | NodePath<ArrowFunctionExpression>,
+  observerName: string,
+): {
+  chain: { path: NodePath<CallExpression>; name: string | null }[];
+  observed: boolean;
+  hasKnownWrapper: boolean;
+} {
+  const chain: { path: NodePath<CallExpression>; name: string | null }[] = [];
+  let hasKnownWrapper = false;
+  let current: NodePath | null = path.parentPath;
+  while (current && isCallExpression(current.node)) {
+    const name = calleeName(current.node as CallExpression);
+    if (name === observerName) return { chain, observed: true, hasKnownWrapper };
+    if (name && WRAPPER_NAMES.has(name)) hasKnownWrapper = true;
+    chain.push({ path: current as NodePath<CallExpression>, name });
+    current = current.parentPath;
+  }
+  return { chain, observed: false, hasKnownWrapper };
+}
+
 function wrapExpressionFunctionWithObserver(
   path: NodePath<FunctionExpression> | NodePath<ArrowFunctionExpression>,
   observerName: string,
 ): boolean {
-  const outer = findOutermostWrapperCall(path, observerName);
+  const { chain, observed } = collectCallChain(path, observerName);
+  if (observed) return false;
 
-  if (outer) {
-    const outerParent = outer.parentPath;
-    if (
-      outerParent &&
-      isCallExpression(outerParent.node) &&
-      calleeName(outerParent.node as CallExpression) === observerName
-    ) {
-      return false;
-    }
+  if (chain.length === 0) {
     const observerCall = buildObserverCall(
       observerName,
-      outer.node as Expression,
+      path.node as Expression,
     );
-    outer.replaceWith(observerCall);
+    path.replaceWith(observerCall);
     return true;
   }
 
-  if (isInsideWrapperCall(path)) return false;
-
-  const parent = path.parent;
-  if (
-    isCallExpression(parent) &&
-    calleeName(parent as CallExpression) === observerName
-  ) {
-    return false;
+  // Rebuild the chain: drop every memo / React.memo layer, keep every
+  // other wrapper (forwardRef, unknown HOCs, etc). observer already
+  // memoises and can't call a memo-wrapped component as a render
+  // function, so memo wrappers are always removed.
+  let rebuilt: Expression = path.node as Expression;
+  for (const { path: wrapperPath, name } of chain) {
+    if (name !== null && isMemoName(name)) continue;
+    const wrapperCall = wrapperPath.node;
+    const rest = wrapperCall.arguments.slice(1) as CallExpression["arguments"];
+    rebuilt = callExpression(
+      wrapperCall.callee as Expression,
+      [rebuilt as CallExpression["arguments"][number], ...rest],
+    );
   }
+  rebuilt = buildObserverCall(observerName, rebuilt);
 
-  const observerCall = buildObserverCall(observerName, path.node as Expression);
-  path.replaceWith(observerCall);
+  const outermost = chain[chain.length - 1].path;
+  outermost.replaceWith(rebuilt);
   return true;
 }
 
