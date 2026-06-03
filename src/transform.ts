@@ -8,6 +8,7 @@ import type {
   TSDeclareFunction,
 } from "@babel/types";
 import {
+  blockStatement,
   callExpression,
   exportDefaultDeclaration,
   exportNamedDeclaration,
@@ -19,12 +20,14 @@ import {
   isExportDefaultDeclaration,
   isExportNamedDeclaration,
   isFunctionDeclaration,
+  isFunctionExpression,
   isIdentifier,
   isImportSpecifier,
   isMemberExpression,
   isObjectProperty,
   isTSDeclareFunction,
   isVariableDeclarator,
+  returnStatement,
   stringLiteral,
   variableDeclaration,
   variableDeclarator,
@@ -329,19 +332,93 @@ function collectCallChain(
   return { chain, observed: false, hasKnownWrapper };
 }
 
+// Whether an arrow references `this`/`arguments` in its own (lexical)
+// scope. Arrows capture both from the enclosing scope, so rewriting such
+// an arrow into a function expression — which gets its own `this` and
+// `arguments` — would change its meaning. Nested non-arrow functions
+// rebind both, so we don't look inside them; nested arrows inherit, so we
+// do. Used as a safety guard before renaming: the (vanishingly rare)
+// component that relies on lexical `this`/`arguments` is left untouched.
+function arrowUsesThisOrArguments(
+  path: NodePath<ArrowFunctionExpression>,
+): boolean {
+  let found = false;
+  path.traverse({
+    ThisExpression() {
+      found = true;
+    },
+    Identifier(idPath) {
+      if (idPath.node.name === "arguments" && idPath.isReferencedIdentifier()) {
+        found = true;
+      }
+    },
+    Function(innerPath) {
+      if (!innerPath.isArrowFunctionExpression()) innerPath.skip();
+    },
+  });
+  return found;
+}
+
+// Give the render function a real name so it survives into stack traces
+// and React DevTools. `observer()` copies the base component's
+// `name`/`displayName`, so a named inner function is all that's needed for
+// the wrapped component to display `componentName` everywhere — the same
+// trick the function-declaration path already relies on.
+//
+//   - An anonymous function expression simply receives an `id`.
+//   - An arrow function is rewritten into the equivalent named function
+//     expression (an expression body is wrapped in a `return`).
+//
+// Functions that already carry a name, arrows that use lexical
+// `this`/`arguments`, and call sites with no inferable name are returned
+// unchanged.
+function nameComponentFunction(
+  path: NodePath<FunctionExpression> | NodePath<ArrowFunctionExpression>,
+  componentName: string | null,
+): Expression {
+  const node = path.node;
+  if (!componentName) return node as Expression;
+
+  if (isFunctionExpression(node)) {
+    if (!node.id) node.id = identifier(componentName);
+    return node;
+  }
+
+  // ArrowFunctionExpression
+  if (arrowUsesThisOrArguments(path as NodePath<ArrowFunctionExpression>)) {
+    return node as Expression;
+  }
+
+  const body =
+    node.body.type === "BlockStatement"
+      ? node.body
+      : blockStatement([returnStatement(node.body as Expression)]);
+
+  const fnExpr = functionExpression(
+    identifier(componentName),
+    node.params,
+    body,
+    false,
+    node.async,
+  );
+  fnExpr.returnType = node.returnType ?? null;
+  fnExpr.typeParameters = node.typeParameters ?? null;
+  return fnExpr;
+}
+
 function wrapExpressionFunctionWithObserver(
   path: NodePath<FunctionExpression> | NodePath<ArrowFunctionExpression>,
   observerName: string,
   memoNames: Set<string>,
+  componentName: string | null,
 ): boolean {
   const { chain, observed } = collectCallChain(path, observerName);
   if (observed) return false;
 
+  const base = nameComponentFunction(path, componentName);
+
   if (chain.length === 0) {
-    const observerCall = buildObserverCall(
-      observerName,
-      path.node as Expression,
-    );
+    const observerCall = buildObserverCall(observerName, base);
     path.replaceWith(observerCall);
     return true;
   }
@@ -351,7 +428,7 @@ function wrapExpressionFunctionWithObserver(
   // unknown HOCs, etc). observer already memoises and can't call a
   // memo-wrapped component as a render function, so memo wrappers are
   // always removed.
-  let rebuilt: Expression = path.node as Expression;
+  let rebuilt: Expression = base;
   for (const { path: wrapperPath, name } of chain) {
     if (name !== null && memoNames.has(name)) continue;
     const wrapperCall = wrapperPath.node;
@@ -459,6 +536,7 @@ export const transform: PluginObj<TransformState> = {
             fnPath as NodePath<FunctionExpression> | NodePath<ArrowFunctionExpression>,
             IMPORT_NAME,
             MEMO_NAMES,
+            componentName,
           );
         }
         if (didWrap) {

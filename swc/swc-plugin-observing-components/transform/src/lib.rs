@@ -1,5 +1,5 @@
 use swc_core::ecma::ast::*;
-use swc_core::ecma::visit::{fold_pass, noop_fold_type, Fold, FoldWith};
+use swc_core::ecma::visit::{fold_pass, noop_fold_type, Fold, FoldWith, Visit, VisitWith};
 use swc_core::common::{comments::Comments, BytePos, Span, Spanned};
 use serde::Deserialize;
 use globset::{Glob, GlobSetBuilder};
@@ -399,6 +399,117 @@ fn module_contains_wrapped_function(module: &Module, observer_name: &str) -> boo
     })
 }
 
+// Detects whether an arrow references `this`/`arguments` in its own
+// lexical scope. Arrows capture both from the enclosing scope, so
+// rewriting such an arrow into a named function expression — which gets
+// its own `this`/`arguments` — would change its meaning, and those rare
+// components are left untouched. Nested non-arrow functions rebind both,
+// so their bodies are skipped; nested arrows inherit, so they are scanned.
+struct LexicalThisArgsFinder {
+    found: bool,
+}
+
+impl Visit for LexicalThisArgsFinder {
+    fn visit_this_expr(&mut self, _n: &ThisExpr) {
+        self.found = true;
+    }
+    fn visit_ident(&mut self, n: &Ident) {
+        if &*n.sym == "arguments" {
+            self.found = true;
+        }
+    }
+    fn visit_function(&mut self, _n: &Function) {
+        // Nested non-arrow function: its `this`/`arguments` are its own.
+    }
+}
+
+fn arrow_uses_this_or_arguments(arrow: &ArrowExpr) -> bool {
+    let mut finder = LexicalThisArgsFinder { found: false };
+    arrow.visit_children_with(&mut finder);
+    finder.found
+}
+
+// Rewrite an arrow function into the equivalent named function expression
+// (an expression body is wrapped in a `return`).
+fn arrow_to_named_fn(arrow: ArrowExpr, name: &str) -> Expr {
+    let body = match *arrow.body {
+        BlockStmtOrExpr::BlockStmt(block) => block,
+        BlockStmtOrExpr::Expr(expr) => BlockStmt {
+            span: Default::default(),
+            ctxt: Default::default(),
+            stmts: vec![Stmt::Return(ReturnStmt {
+                span: Default::default(),
+                arg: Some(expr),
+            })],
+        },
+    };
+    let params = arrow
+        .params
+        .into_iter()
+        .map(|pat| Param {
+            span: Default::default(),
+            decorators: vec![],
+            pat,
+        })
+        .collect();
+    let function = Function {
+        params,
+        decorators: vec![],
+        span: arrow.span,
+        ctxt: Default::default(),
+        body: Some(body),
+        is_generator: false,
+        is_async: arrow.is_async,
+        type_params: arrow.type_params,
+        return_type: arrow.return_type,
+    };
+    Expr::Fn(FnExpr {
+        ident: Some(Ident::new(name.into(), Default::default(), Default::default())),
+        function: Box::new(function),
+    })
+}
+
+// Give the render function a real name so it survives into stack traces and
+// React DevTools (observer copies the base component's `name`/`displayName`).
+// Mirrors the Babel transform: anonymous function expressions get an `id`,
+// arrows become named function expressions, and wrapper calls
+// (`forwardRef`/unknown HOCs) recurse to their innermost function. Already
+// named functions and call sites with no name are returned unchanged.
+fn name_component_expr(expr: Expr, name: &str) -> Expr {
+    if name.is_empty() {
+        return expr;
+    }
+    match expr {
+        Expr::Arrow(arrow) => {
+            if arrow_uses_this_or_arguments(&arrow) {
+                Expr::Arrow(arrow)
+            } else {
+                arrow_to_named_fn(arrow, name)
+            }
+        }
+        Expr::Fn(mut fn_expr) => {
+            if fn_expr.ident.is_none() {
+                fn_expr.ident =
+                    Some(Ident::new(name.into(), Default::default(), Default::default()));
+            }
+            Expr::Fn(fn_expr)
+        }
+        Expr::Call(mut call) => {
+            if let Some(first) = call.args.first_mut() {
+                let named = name_component_expr((*first.expr).clone(), name);
+                first.expr = Box::new(named);
+            }
+            Expr::Call(call)
+        }
+        Expr::Paren(mut paren) => {
+            let named = name_component_expr((*paren.expr).clone(), name);
+            paren.expr = Box::new(named);
+            Expr::Paren(paren)
+        }
+        other => other,
+    }
+}
+
 impl<C: Comments + 'static> Fold for ObserverTransform<C> {
     noop_fold_type!();
 
@@ -643,7 +754,8 @@ impl<C: Comments + 'static> Fold for ObserverTransform<C> {
                                     let is_component = var_name.as_ref()
                                         .map(|name| is_component_name(name))
                                         .unwrap_or(false);
-                                    
+                                    let comp_name = var_name.as_deref().unwrap_or("");
+
                                     if is_component && contains_jsx_in_expr(&*init) {
                                         // Handle both direct function expressions and wrapped functions
                                         match &**init {
@@ -657,7 +769,10 @@ impl<C: Comments + 'static> Fold for ObserverTransform<C> {
                                                     )))),
                                                     args: vec![ExprOrSpread {
                                                         spread: None,
-                                                        expr: init.clone(),
+                                                        expr: Box::new(name_component_expr(
+                                                            (**init).clone(),
+                                                            comp_name,
+                                                        )),
                                                     }],
                                                     type_args: None,
                                                     ctxt: Default::default(),
@@ -679,7 +794,10 @@ impl<C: Comments + 'static> Fold for ObserverTransform<C> {
                                                         )))),
                                                         args: vec![ExprOrSpread {
                                                             spread: None,
-                                                            expr: init.clone(),
+                                                            expr: Box::new(name_component_expr(
+                                                                (**init).clone(),
+                                                                comp_name,
+                                                            )),
                                                         }],
                                                         type_args: None,
                                                         ctxt: Default::default(),
@@ -743,7 +861,8 @@ impl<C: Comments + 'static> Fold for ObserverTransform<C> {
                             let is_component = var_name.as_ref()
                                 .map(|name| is_component_name(name))
                                 .unwrap_or(false);
-                            
+                            let comp_name = var_name.as_deref().unwrap_or("");
+
                             if is_component && contains_jsx_in_expr(&*init) {
                                 // Handle both direct function expressions and wrapped functions
                                 match &**init {
@@ -757,7 +876,10 @@ impl<C: Comments + 'static> Fold for ObserverTransform<C> {
                                             )))),
                                             args: vec![ExprOrSpread {
                                                 spread: None,
-                                                expr: init.clone(),
+                                                expr: Box::new(name_component_expr(
+                                                    (**init).clone(),
+                                                    comp_name,
+                                                )),
                                             }],
                                             type_args: None,
                                             ctxt: Default::default(),
@@ -783,7 +905,10 @@ impl<C: Comments + 'static> Fold for ObserverTransform<C> {
                                                 )))),
                                                 args: vec![ExprOrSpread {
                                                     spread: None,
-                                                    expr: init.clone(),
+                                                    expr: Box::new(name_component_expr(
+                                                        (**init).clone(),
+                                                        comp_name,
+                                                    )),
                                                 }],
                                                 type_args: None,
                                                 ctxt: Default::default(),

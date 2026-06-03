@@ -27,17 +27,19 @@ async function runSwc(
 }
 
 describe("swc wasm plugin (against the @swc/core that ships with Vite 7/8)", () => {
-  test("plugin loads and transforms a basic arrow component", async () => {
+  test("plugin loads and transforms a basic arrow component (named)", async () => {
     const out = await runSwc(`const Foo = () => <div>hi</div>;`);
     expect(out).toMatch(/from "mobx-react-observer"/);
-    expect(out).toMatch(/const Foo = observer\(/);
+    // The arrow is named after the variable so the component keeps its name
+    // in stack traces and React DevTools.
+    expect(out).toMatch(/const Foo = observer\(function Foo\(/);
   });
 
-  test("wraps observer outside forwardRef (arrow)", async () => {
+  test("wraps observer outside forwardRef (arrow named after the variable)", async () => {
     const out = await runSwc(
       `const Foo = forwardRef((props, ref) => <div ref={ref} />);`,
     );
-    expect(out).toMatch(/const Foo = observer\(forwardRef\(/);
+    expect(out).toMatch(/const Foo = observer\(forwardRef\(function Foo\(/);
     expect(out).not.toMatch(/memo/);
   });
 
@@ -54,7 +56,7 @@ describe("swc wasm plugin (against the @swc/core that ships with Vite 7/8)", () 
 
   test("memo wrappers are dropped: memo(arrow)", async () => {
     const out = await runSwc(`const Foo = memo(() => <div />);`);
-    expect(out).toMatch(/const Foo = observer\(\(\)/);
+    expect(out).toMatch(/const Foo = observer\(function Foo\(/);
     expect(out).not.toMatch(/memo/);
   });
 
@@ -169,7 +171,7 @@ describe("swc wasm plugin (against the @swc/core that ships with Vite 7/8)", () 
       { strip_as_memo: ["withMemo"] },
     );
     expect(out).toMatch(
-      /const Component = observer\(withSomeHOCSome\(\(\)/,
+      /const Component = observer\(withSomeHOCSome\(function Component\(/,
     );
     expect(out).not.toMatch(/withMemo\(/);
   });
@@ -183,8 +185,21 @@ const Bar = () => <div />;`,
     // Foo must not be observer-wrapped.
     expect(out).toMatch(/const Foo = \(\)\s*=>/);
     expect(out).not.toMatch(/const Foo = observer\(/);
-    // Bar still gets wrapped.
-    expect(out).toMatch(/const Bar = observer\(/);
+    // Bar still gets wrapped (and named).
+    expect(out).toMatch(/const Bar = observer\(function Bar\(/);
+  });
+
+  test("names an anonymous function expression component", async () => {
+    const out = await runSwc(`const Foo = function () { return <div />; };`);
+    expect(out).toMatch(/const Foo = observer\(function Foo\(/);
+  });
+
+  test("leaves an arrow that uses lexical `this` untouched (anonymous)", async () => {
+    // Rewriting to a function expression would change `this`, so the arrow
+    // is wrapped as-is rather than renamed.
+    const out = await runSwc(`const Foo = () => <div>{this.x}</div>;`);
+    expect(out).toMatch(/const Foo = observer\(\(\)\s*=>/);
+    expect(out).not.toMatch(/function Foo/);
   });
 
   test("@no-observer on a function declaration is honoured", async () => {

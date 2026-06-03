@@ -28,15 +28,57 @@ describe("base transform (parity with upstream)", () => {
 };`);
   });
 
-  test("wraps uppercase arrow component", () => {
+  test("wraps uppercase arrow component (named so it keeps its displayName)", () => {
+    // The arrow is rewritten into a named function expression. Wrapping an
+    // anonymous arrow in observer(...) loses JS name-inference, leaving the
+    // component nameless in stack traces and React DevTools; naming it
+    // restores both (observer copies name -> displayName).
     expect(
       run(`const Counter = () => {
   return <h1>hi</h1>;
 };`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Counter = observer(() => {
+const Counter = observer(function Counter() {
   return <h1>hi</h1>;
 });`);
+  });
+
+  test("names an arrow with an expression body (wraps it in a return)", () => {
+    expect(run(`const Counter = () => <h1>hi</h1>;`)).toBe(
+      `import { observer } from "mobx-react-observer";
+const Counter = observer(function Counter() {
+  return <h1>hi</h1>;
+});`,
+    );
+  });
+
+  test("names an anonymous function expression component", () => {
+    expect(
+      run(`const Counter = function () {
+  return <h1>hi</h1>;
+};`),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Counter = observer(function Counter() {
+  return <h1>hi</h1>;
+});`);
+  });
+
+  test("preserves async on a renamed arrow", () => {
+    expect(run(`const Counter = async () => <h1>hi</h1>;`)).toBe(
+      `import { observer } from "mobx-react-observer";
+const Counter = observer(async function Counter() {
+  return <h1>hi</h1>;
+});`,
+    );
+  });
+
+  test("leaves an arrow that uses lexical `this` untouched (anonymous)", () => {
+    // Rewriting to a function expression would change `this`, so we keep
+    // the arrow as-is rather than risk altering behaviour.
+    expect(run(`const Counter = () => <h1>{this.x}</h1>;`)).toBe(
+      `import { observer } from "mobx-react-observer";
+const Counter = observer(() => <h1>{this.x}</h1>);`,
+    );
   });
 
   test("wraps uppercase function declaration", () => {
@@ -85,11 +127,13 @@ const Counter = () => <h1>hi</h1>;`,
 });
 
 describe("forwardRef", () => {
-  test("observer wraps forwardRef from the outside (anonymous arrow)", () => {
+  test("observer wraps forwardRef from the outside (arrow named after the variable)", () => {
     expect(
       run(`const Foo = forwardRef((props, ref) => <div ref={ref} />);`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(forwardRef((props, ref) => <div ref={ref} />));`);
+const Foo = observer(forwardRef(function Foo(props, ref) {
+  return <div ref={ref} />;
+}));`);
   });
 
   test("observer wraps forwardRef from the outside (named function expression)", () => {
@@ -105,7 +149,9 @@ const Foo = observer(forwardRef(function Foo(props, ref) {
     expect(
       run(`const Foo = React.forwardRef((props, ref) => <div ref={ref} />);`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(React.forwardRef((props, ref) => <div ref={ref} />));`);
+const Foo = observer(React.forwardRef(function Foo(props, ref) {
+  return <div ref={ref} />;
+}));`);
   });
 
   test("observer wraps forwardRef in an export default", () => {
@@ -131,18 +177,22 @@ describe("memo is dropped", () => {
   // component (it tries to invoke the base as a render function). So memo
   // layers are removed during the transform.
 
-  test("memo(arrow) becomes observer(arrow)", () => {
+  test("memo(arrow) becomes observer(named arrow)", () => {
     expect(
       run(`const Foo = memo((props) => <div>{props.x}</div>);`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(props => <div>{props.x}</div>);`);
+const Foo = observer(function Foo(props) {
+  return <div>{props.x}</div>;
+});`);
   });
 
   test("memo(forwardRef(fn)) becomes observer(forwardRef(fn))", () => {
     expect(
       run(`const Foo = memo(forwardRef((props, ref) => <div ref={ref} />));`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(forwardRef((props, ref) => <div ref={ref} />));`);
+const Foo = observer(forwardRef(function Foo(props, ref) {
+  return <div ref={ref} />;
+}));`);
   });
 
   test("memo(named function expression) becomes observer(named fn)", () => {
@@ -158,7 +208,9 @@ const Foo = observer(function Foo(props) {
     expect(
       run(`const Foo = React.memo((props) => <div>{props.x}</div>);`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(props => <div>{props.x}</div>);`);
+const Foo = observer(function Foo(props) {
+  return <div>{props.x}</div>;
+});`);
   });
 
   test("React.memo(React.forwardRef(fn)) becomes observer(React.forwardRef(fn))", () => {
@@ -167,7 +219,9 @@ const Foo = observer(props => <div>{props.x}</div>);`);
         `const Foo = React.memo(React.forwardRef((props, ref) => <div ref={ref} />));`,
       ),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(React.forwardRef((props, ref) => <div ref={ref} />));`);
+const Foo = observer(React.forwardRef(function Foo(props, ref) {
+  return <div ref={ref} />;
+}));`);
   });
 
   test("forwardRef(memo(fn)) drops the inner memo", () => {
@@ -179,7 +233,9 @@ const Foo = observer(React.forwardRef((props, ref) => <div ref={ref} />));`);
 const Bar = forwardRef(memo(function Bar(props, ref) { return <div ref={ref} />; }));`,
       ),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(forwardRef((props, ref) => <div ref={ref} />));
+const Foo = observer(forwardRef(function Foo(props, ref) {
+  return <div ref={ref} />;
+}));
 const Bar = observer(forwardRef(function Bar(props, ref) {
   return <div ref={ref} />;
 }));`);
@@ -189,7 +245,9 @@ const Bar = observer(forwardRef(function Bar(props, ref) {
     expect(
       run(`const Foo = memo(memo((props) => <div>{props.x}</div>));`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(props => <div>{props.x}</div>);`);
+const Foo = observer(function Foo(props) {
+  return <div>{props.x}</div>;
+});`);
   });
 
   test("memo(forwardRef(named)) export default", () => {
@@ -285,7 +343,7 @@ const Foo = () => <div />;`);
 const Foo = () => <div />;
 const Bar = () => <div />;`);
     expect(out).toMatch(/const Foo = \(\) => <div \/>;/);
-    expect(out).toMatch(/const Bar = observer\(\(\) => <div \/>\);/);
+    expect(out).toMatch(/const Bar = observer\(function Bar\(\)/);
   });
 
   test("pragma skips memo + unknown HOC case too", () => {
@@ -341,7 +399,9 @@ export default observer(withSomeHOCSome(function Component() {
         `const Component = memo(unknownA(unknownB(() => <div />)));`,
       ),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Component = observer(unknownA(unknownB(() => <div />)));`);
+const Component = observer(unknownA(unknownB(function Component() {
+  return <div />;
+})));`);
   });
 
   test("custom memo aliases via stripAsMemo are also stripped", () => {
@@ -380,7 +440,9 @@ const Foo = observer(withSomething(function Foo() {
     expect(
       run(`const Foo = withSomething(forwardRef((props, ref) => <div ref={ref} />));`),
     ).toBe(`import { observer } from "mobx-react-observer";
-const Foo = observer(withSomething(forwardRef((props, ref) => <div ref={ref} />)));`);
+const Foo = observer(withSomething(forwardRef(function Foo(props, ref) {
+  return <div ref={ref} />;
+})));`);
   });
 });
 
