@@ -1,0 +1,12 @@
+# Rust 1.96+ makes wasm-ld reject undefined symbols by default. SWC plugins
+# import host functions (`__emit_diagnostics`, `__set_transform_result`,
+# `__get_leading_comments_proxy`, `__get_transform_plugin_config`, ...) that are
+# only resolved when the SWC host instantiates the module, so they MUST remain
+# undefined at link time. Tell the linker to turn undefined symbols into wasm
+# imports — restoring the pre-1.96 default that earlier releases relied on.
+#
+# This lives at `swc/.cargo/config.toml` (not in the crate subdir) because the
+# release workflow builds from `swc/`, and cargo only reads config from the cwd
+# and its ancestors.
+[target.wasm32-wasip1]
+rustflags = ["-C", "link-arg=--allow-undefined"]
