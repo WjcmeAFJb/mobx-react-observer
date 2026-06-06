@@ -260,6 +260,87 @@ export default observer(forwardRef((props, ref) => <div ref={ref} />));`);
   });
 });
 
+describe("memo around a component whose JSX is in a nested helper", () => {
+  // A component that renders through an inner helper function — its JSX is
+  // not the direct return value — is still a component. The SWC plugin
+  // detects these by recursing into nested functions; the Babel transform
+  // mirrors that, so the `memo(...)` is unwound and observer applied
+  // (rather than the memo being stripped and the component left unwrapped,
+  // or the whole thing left untouched).
+
+  test("memo(named fn) with JSX only in a nested render helper", () => {
+    expect(
+      run(
+        `const Component = memo(function Component() {
+  const row = () => <div />;
+  return row();
+});`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Component = observer(function Component() {
+  const row = () => <div />;
+  return row();
+});`);
+  });
+
+  test("memo(arrow) with JSX only in a nested render helper", () => {
+    expect(
+      run(
+        `const Component = memo(() => {
+  const row = () => <div />;
+  return row();
+});`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Component = observer(function Component() {
+  const row = () => <div />;
+  return row();
+});`);
+  });
+
+  test("bare component (no memo) with JSX only in a nested helper is wrapped", () => {
+    expect(
+      run(
+        `const Component = function Component() {
+  const row = () => <div />;
+  return row();
+};`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Component = observer(function Component() {
+  const row = () => <div />;
+  return row();
+});`);
+  });
+
+  test("memo(forwardRef) with JSX only in a nested helper keeps forwardRef", () => {
+    expect(
+      run(
+        `const Component = memo(forwardRef(function Component(props, ref) {
+  const row = () => <div ref={ref} />;
+  return row();
+}));`,
+      ),
+    ).toBe(`import { observer } from "mobx-react-observer";
+const Component = observer(forwardRef(function Component(props, ref) {
+  const row = () => <div ref={ref} />;
+  return row();
+}));`);
+  });
+
+  test("memo around a non-component (no JSX anywhere) is left untouched", () => {
+    // `memo(...)` of something that never renders JSX is a valid value and
+    // must not be torn apart: it is neither stripped nor observer-wrapped.
+    expect(
+      run(`const Component = memo(function Component() {
+  return compute();
+});`),
+    ).toBe(`const Component = memo(function Component() {
+  return compute();
+});`);
+  });
+});
+
 describe("TypeScript overloads", () => {
   test("implementation-signature is wrapped; overload signatures are dropped", () => {
     const input = `function Foo(x: string): JSX.Element;
