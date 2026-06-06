@@ -147,14 +147,22 @@ function hasIgnorePragma(path: NodePath): boolean {
   return false;
 }
 
+// Whether a function body contains JSX, looking *through* nested helper
+// functions. A component whose JSX only appears inside an inner render
+// helper — `function Component() { const row = () => <div/>; return
+// row(); }` — is still a component and must be detected so its `memo(...)`
+// wrapper is unwound and observer applied. This mirrors the SWC plugin's
+// `contains_jsx_in_function`, which recurses through nested functions when
+// deciding whether an expression ultimately produces a component.
+//
+// The traversal is scoped to `path`'s own subtree; when the caller wraps
+// this function with observer it `skip()`s the subtree, so a nested
+// component is never double-wrapped from here.
 function hasJsx(path: NodePath): boolean {
   let found = false;
   path.traverse({
     JSX() {
       found = true;
-    },
-    Function(innerPath) {
-      if (innerPath !== path) innerPath.skip();
     },
   });
   return found;
